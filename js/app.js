@@ -12,10 +12,12 @@
 
 /* ------------------------- チューニング定数 ------------------------- */
 const CFG = {
-  TARGET_TOTAL: 60,      // 目標採用枚数(上限)
-  MIN_TOTAL:    48,      // これ以上で「十分」
+  TARGET_TOTAL: 64,      // 目標採用枚数(上限。AnySplat の VRAM 安全域)
+  MIN_TOTAL:    54,      // これ以上で「十分」
   SECTORS:      16,      // 方位カバレッジの分割数
   MIN_PER_SECTOR: 2,     // 各方位で最低欲しい枚数
+  ELEV_DEG: 20,          // 上下バンドの境界(度)。|elev|>ELEV_DEG で 上/下
+  MIN_PER_BAND: 6,       // 天井/正面/床 各バンドで最低欲しい枚数
   CAP_W: 1600,           // 保存フレームの最大幅(横持ち想定, 高さは比率維持)
   JPEG_Q: 0.85,
   SMALL_W: 96, SMALL_H: 54, // 動き・ブレ判定用の縮小サイズ
@@ -52,8 +54,12 @@ const S = {
   yaw: 0,                // フォールバック用のジャイロ積分ヨー
   rotDps: 0,             // 角速度の大きさ(deg/s)
   linAcc: 0,             // 線形加速度の大きさ
+  grav: { x: 0, y: 0, z: 0 },  // 重力方向(低域通過)
+  elev: 0,               // カメラ仰角(deg, +上/-下)
+  elevCount: new Int32Array(3), // [上, 正面, 下] の採用枚数
   lastMotionTs: 0,
   coach: '',
+  captureStart: 0,       // 撮影開始時刻
 };
 
 /* ------------------------- DOM ------------------------- */
@@ -65,6 +71,11 @@ const chipCov = document.getElementById('chip-coverage');
 const coachEl = document.getElementById('coach');
 const flashEl = document.getElementById('shutter-flash');
 const rotateHint = document.getElementById('rotate-hint');
+const elevCells = [
+  document.getElementById('elev-up'),
+  document.getElementById('elev-level'),
+  document.getElementById('elev-down'),
+];
 
 /* 作業用オフスクリーン canvas */
 const capCanvas = document.createElement('canvas');
@@ -123,6 +134,24 @@ function onMotion(ev){
   }
   const a = ev.acceleration || {};   // 重力除去済み(端末が対応していれば)
   S.linAcc = Math.hypot(a.x||0, a.y||0, a.z||0);
+
+  // 重力方向を低域通過で推定 → カメラ仰角(上/正面/下)を求める。
+  // カメラは端末の背面(-Z)を向く。重力の Z 成分でazimuthに依らず仰角が出る。
+  const ag = ev.accelerationIncludingGravity;
+  if (ag && ag.z != null) {
+    const k = 0.12;
+    S.grav.x = S.grav.x*(1-k) + (ag.x||0)*k;
+    S.grav.y = S.grav.y*(1-k) + (ag.y||0)*k;
+    S.grav.z = S.grav.z*(1-k) + (ag.z||0)*k;
+    const gm = Math.hypot(S.grav.x, S.grav.y, S.grav.z) || 1;
+    S.elev = Math.asin(Math.max(-1, Math.min(1, S.grav.z / gm))) * 180 / Math.PI;
+  }
+}
+// 仰角 → バンド番号(0=上/天井, 1=正面, 2=下/床)
+function elevBand(){
+  if (S.elev > CFG.ELEV_DEG) return 0;
+  if (S.elev < -CFG.ELEV_DEG) return 2;
+  return 1;
 }
 
 /* ===================================================================
@@ -170,11 +199,13 @@ function captureFrame(small, sharp){
   capCanvas.width = Math.round(vw * scale);
   capCanvas.height = Math.round(vh * scale);
   capCtx.drawImage(video, 0, 0, capCanvas.width, capCanvas.height);
+  const band = elevBand();          // 撮影時点の仰角バンドを確定
+  const elevAtCap = S.elev;
   capCanvas.toBlob((blob) => {
     if (!blob) return;
-    S.captured.push({ blob, small, sharp, heading: S.heading, t: Date.now() });
-    const sec = sectorOf(S.heading);
-    S.sectorCount[sec]++;
+    S.captured.push({ blob, small, sharp, heading: S.heading, elev: elevAtCap, band, t: Date.now() });
+    S.sectorCount[sectorOf(S.heading)]++;
+    S.elevCount[band]++;
     updateHud();
   }, 'image/jpeg', CFG.JPEG_Q);
 
@@ -230,31 +261,60 @@ function loop(){
 
   // ---- コーチング表示 ----
   let msg = 'ゆっくり動かしてください', cls = '';
+  const bandGap = neededBand();     // 0=上/天井, 2=下/床 が不足, -1=なし
   if (!isLandscape) { msg = '📱 横向きにしてください(撮影は横向きのみ)'; cls = 'warn'; }
   else if (tooFast) { msg = '⚠️ ゆっくり(速すぎ)'; cls = 'warn'; }
   else if (blurry) { msg = '⚠️ ブレています / 止めて'; cls = 'warn'; }
   else if (!enoughParallax && S.rotDps < 8 && S.linAcc < CFG.STILL_ACC) {
     msg = '🚶 歩いて視点を変えて'; cls = '';
-  } else if (coverageDone() && S.captured.length >= CFG.MIN_TOTAL) {
+  } else if (allDone()) {
     msg = '✅ 十分です。終了できます'; cls = 'good';
-  } else {
+  } else if (bandGap === 0) { msg = '⬆️ 上(天井)も撮って'; }
+  else if (bandGap === 2) { msg = '⬇️ 下(床)も撮って'; }
+  else {
     const gap = nextGapDir();
     msg = gap == null ? '📸 いい調子、続けて' : `🧭 ${gap} の方向を埋めて`;
   }
   if (msg !== S.coach) { coachEl.textContent = msg; coachEl.className = 'coach ' + cls; S.coach = msg; }
 
   drawCoverage();
+  updateElevUI();
 }
 
 function updateHud(){
   chipCount.textContent = `${S.captured.length} / ${CFG.MIN_TOTAL}`;
-  chipCov.textContent = `方向 ${filledSectors()}/${CFG.SECTORS}`;
+  let bands = 0; for (let i = 0; i < 3; i++) if (S.elevCount[i] >= CFG.MIN_PER_BAND) bands++;
+  chipCov.textContent = `方位 ${filledSectors()}/${CFG.SECTORS}・上下 ${bands}/3`;
 }
 function filledSectors(){
   let c = 0; for (let i = 0; i < CFG.SECTORS; i++) if (S.sectorCount[i] >= CFG.MIN_PER_SECTOR) c++;
   return c;
 }
 function coverageDone(){ return filledSectors() === CFG.SECTORS; }
+function elevDone(){
+  for (let i = 0; i < 3; i++) if (S.elevCount[i] < CFG.MIN_PER_BAND) return false;
+  return true;
+}
+// 上(0)/下(2)で不足している方(より少ない方)を返す。両方満たせば -1
+function neededBand(){
+  const up = S.elevCount[0], down = S.elevCount[2];
+  const upNeed = up < CFG.MIN_PER_BAND, downNeed = down < CFG.MIN_PER_BAND;
+  if (upNeed && downNeed) return up <= down ? 0 : 2;
+  if (upNeed) return 0;
+  if (downNeed) return 2;
+  return -1;
+}
+function allDone(){
+  return coverageDone() && elevDone() && S.captured.length >= CFG.MIN_TOTAL;
+}
+function updateElevUI(){
+  const cur = elevBand();
+  for (let i = 0; i < 3; i++){
+    const el = elevCells[i]; if (!el) continue;
+    el.classList.toggle('done', S.elevCount[i] >= CFG.MIN_PER_BAND);
+    el.classList.toggle('active', i === cur);
+  }
+}
 
 // 現在の向きから見て、最も近い未充足セクターの方角ラベル
 function nextGapDir(){
@@ -344,11 +404,19 @@ async function finishCapture(){
   const btnDl = document.getElementById('btn-download');
   thumbs.innerHTML = ''; btnDl.disabled = true;
 
+  const capSec = S.captureStart ? (performance.now() - S.captureStart) / 1000 : 0;
   summary.textContent = `撮影 ${S.captured.length} 枚 → 端末内で選別中…`;
   await new Promise(r => setTimeout(r, 30)); // UI更新を挟む
 
+  const t0 = performance.now();
   const kept = curate(S.captured);
-  summary.textContent = `撮影 ${S.captured.length} 枚 → 選別後 ${kept.length} 枚(ブレ除去＋視点均等化済み)`;
+  const curateMs = Math.round(performance.now() - t0);
+
+  let bands = 0; for (let i = 0; i < 3; i++) if (S.elevCount[i] >= CFG.MIN_PER_BAND) bands++;
+  summary.textContent =
+    `撮影 ${S.captured.length} 枚 → 選別後 ${kept.length} 枚(ブレ除去＋視点均等化済み)\n` +
+    `⏱️ 撮影 ${capSec.toFixed(0)} 秒 / 端末内処理 ${curateMs} ms ` +
+    `| 方位 ${filledSectors()}/${CFG.SECTORS}・上下 ${bands}/3(天井 ${S.elevCount[0]} / 正面 ${S.elevCount[1]} / 床 ${S.elevCount[2]})`;
 
   // サムネイル
   for (const f of kept.slice(0, 60)){
@@ -360,12 +428,18 @@ async function finishCapture(){
   // zip 準備
   const files = [];
   const meta = { app: 'room-capture-3dgs', created: new Date().toISOString(),
-                 count: kept.length, sectors: CFG.SECTORS, frames: [] };
+                 count: kept.length, captured: S.captured.length,
+                 capture_seconds: +capSec.toFixed(1), curate_ms: curateMs,
+                 sectors: CFG.SECTORS,
+                 elev_bands: { up: S.elevCount[0], level: S.elevCount[1], down: S.elevCount[2] },
+                 frames: [] };
   for (let i = 0; i < kept.length; i++){
     const name = `frame_${String(i+1).padStart(4,'0')}.jpg`;
     const buf = new Uint8Array(await kept[i].blob.arrayBuffer());
     files.push({ name, data: buf });
     meta.frames.push({ file: name, heading: Math.round(kept[i].heading),
+                       elev: Math.round(kept[i].elev || 0),
+                       band: ['up','level','down'][kept[i].band ?? 1],
                        sharpness: +kept[i].sharp.toFixed(4), t: kept[i].t });
   }
   files.push({ name: 'capture_meta.json',
@@ -487,7 +561,8 @@ async function beginSession(){
   // 状態リセット
   S.captured = []; S.lastSmall = null; S.lastKeySmall = null; S.accMotion = 0;
   S.lastCapTime = 0; S.sharpHist = []; S.sectorCount = new Int32Array(CFG.SECTORS);
-  S.yaw = 0; S.coach = '';
+  S.elevCount = new Int32Array(3); S.grav = { x: 0, y: 0, z: 0 }; S.elev = 0;
+  S.yaw = 0; S.coach = ''; S.captureStart = performance.now();
   updateHud();
 
   show('capture');

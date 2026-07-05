@@ -13,11 +13,11 @@
 <section id="screen-start" class="screen active">
   <div class="start-card">
     <h1>Room Capture</h1>
-    <p class="lead">部屋を歩き回りながら撮影し、AnySplat 用の高品質な画像セット(48〜60枚)を自動で集めます。</p>
+    <p class="lead">部屋を歩き回りながら撮影し、AnySplat 用の高品質な画像セット(54〜64枚)を自動で集めます。上下(天井・床)まで満遍なく。</p>
     <ol class="tips">
       <li>📱 <b>横向き</b>にして持つ</li>
       <li>🚶 <b>ゆっくり歩いて回り込む</b>(その場でクルクル回さない)</li>
-      <li>🧭 画面のリングの<b>灰色の方向</b>を埋めるように向く</li>
+      <li>🧭 リングの<b>灰色の方向</b>と、<b>上(天井)・正面・下(床)</b>をすべて埋める</li>
       <li>💡 明るい場所で。ブレたら自動で撮り直します</li>
     </ol>
     <p class="note">画像は端末内だけで処理され、外部に送信されません。撮影後に zip でダウンロードできます。</p>
@@ -43,6 +43,13 @@
 
   <!-- カバレッジ・ドーム(コンパスリング) -->
   <canvas id="coverage" width="220" height="220" class="coverage"></canvas>
+
+  <!-- 上下(elevation)カバレッジ -->
+  <div id="elev" class="elev">
+    <div class="elev-cell" id="elev-up"><b>上</b><small>天井</small></div>
+    <div class="elev-cell" id="elev-level"><b>正面</b></div>
+    <div class="elev-cell" id="elev-down"><b>下</b><small>床</small></div>
+  </div>
 
   <!-- 中央の指示 -->
   <div id="coach" class="coach">ゆっくり動かしてください</div>
