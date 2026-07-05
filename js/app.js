@@ -21,8 +21,8 @@ const CFG = {
   SMALL_W: 96, SMALL_H: 54, // 動き・ブレ判定用の縮小サイズ
   MOTION_BAND: 1.15,     // 前回採用からの累積動き量がこれを超えたら撮る(視差バンド)
   MIN_INTERVAL_MS: 350,  // 連写しすぎ防止
-  BLUR_REL: 0.55,        // シャープネスが直近中央値のこの倍未満なら「ブレ」で見送り
-  FAST_ROT_DPS: 75,      // これ以上の角速度は「速すぎ(ブレ)」警告
+  BLUR_REL: 0.60,        // シャープネスが直近中央値のこの倍未満なら「ブレ」で見送り
+  FAST_ROT_DPS: 50,      // これ以上の角速度は「速すぎ(ブレ)」警告
   STILL_ACC: 0.25,       // 線形加速度がこれ未満が続くと「歩いて視点を変えて」
 };
 
@@ -211,13 +211,16 @@ function loop(){
   S.lastSmall = g;
 
   const now = performance.now();
+  // 横向き(landscape)のフレームだけ採用する。撮影開始直後は映像ストリームが
+  // 縦向きで届くことがあり、そのまま撮ると向きが混在してしまうため必須のゲート。
+  const isLandscape = video.videoWidth >= video.videoHeight;
   const tooFast = S.rotDps > CFG.FAST_ROT_DPS;
   const blurry = med > 0 && sharp < CFG.BLUR_REL * med;
   const enoughParallax = S.accMotion >= CFG.MOTION_BAND;
   const intervalOK = (now - S.lastCapTime) > CFG.MIN_INTERVAL_MS;
 
   // ---- 自動シャッター判定 ----
-  if (enoughParallax && intervalOK && !tooFast && !blurry &&
+  if (isLandscape && enoughParallax && intervalOK && !tooFast && !blurry &&
       S.captured.length < CFG.TARGET_TOTAL) {
     captureFrame(g, sharp);
     S.lastKeySmall = g;
@@ -227,7 +230,8 @@ function loop(){
 
   // ---- コーチング表示 ----
   let msg = 'ゆっくり動かしてください', cls = '';
-  if (tooFast) { msg = '⚠️ ゆっくり(速すぎ)'; cls = 'warn'; }
+  if (!isLandscape) { msg = '📱 横向きにしてください(撮影は横向きのみ)'; cls = 'warn'; }
+  else if (tooFast) { msg = '⚠️ ゆっくり(速すぎ)'; cls = 'warn'; }
   else if (blurry) { msg = '⚠️ ブレています / 止めて'; cls = 'warn'; }
   else if (!enoughParallax && S.rotDps < 8 && S.linAcc < CFG.STILL_ACC) {
     msg = '🚶 歩いて視点を変えて'; cls = '';
